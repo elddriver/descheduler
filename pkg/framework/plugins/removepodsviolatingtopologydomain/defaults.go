@@ -1,0 +1,45 @@
+/*
+Copyright 2026 The Kubernetes Authors.
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+    http://www.apache.org/licenses/LICENSE-2.0
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package removepodsviolatingtopologydomain
+
+import (
+	"k8s.io/apimachinery/pkg/runtime"
+	utilptr "k8s.io/utils/ptr"
+)
+
+func addDefaultingFuncs(scheme *runtime.Scheme) error {
+	return RegisterDefaults(scheme)
+}
+
+// SetDefaults_RemovePodsViolatingTopologyDomainArgs sets the default arguments
+// for the RemovePodsViolatingTopologyDomain plugin.
+func SetDefaults_RemovePodsViolatingTopologyDomainArgs(obj runtime.Object) {
+	args := obj.(*RemovePodsViolatingTopologyDomainArgs)
+
+	if args.TopologyKey == "" {
+		args.TopologyKey = "huawei.com/topotree.domainid"
+	}
+	if args.TopologyLabelPrefix == "" {
+		args.TopologyLabelPrefix = "huawei.com/topotree."
+	}
+	if len(args.TopologyLabelPriority) == 0 {
+		args.TopologyLabelPriority = []string{"superpodid", "domainid"}
+	}
+	if args.MaxEffectiveDiff == nil {
+		args.MaxEffectiveDiff = utilptr.To[int32](5)
+	}
+	if args.NPUResourceName == nil {
+		args.NPUResourceName = utilptr.To[string]("huawei.com/Ascend910")
+	}
+}

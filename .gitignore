@@ -4,5 +4,7 @@ vendordiff.patch
 .idea/
 *.code-workspace
 .vscode/
+.history
+.zhanlu
 kind
 bin/
