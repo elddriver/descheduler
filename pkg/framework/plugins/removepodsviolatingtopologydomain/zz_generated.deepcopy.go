@@ -41,11 +41,6 @@ func (in *RemovePodsViolatingTopologyDomainArgs) DeepCopyInto(out *RemovePodsVio
 		*out = new(v1.LabelSelector)
 		(*in).DeepCopyInto(*out)
 	}
-	if in.TopologyLabelPriority != nil {
-		in, out := &in.TopologyLabelPriority, &out.TopologyLabelPriority
-		*out = make([]string, len(*in))
-		copy(*out, *in)
-	}
 	if in.MaxEffectiveDiff != nil {
 		in, out := &in.MaxEffectiveDiff, &out.MaxEffectiveDiff
 		*out = new(int32)

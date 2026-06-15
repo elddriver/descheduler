@@ -30,16 +30,16 @@ func SetDefaults_RemovePodsViolatingTopologyDomainArgs(obj runtime.Object) {
 	if args.TopologyKey == "" {
 		args.TopologyKey = "huawei.com/topotree.domainid"
 	}
-	if args.TopologyLabelPrefix == "" {
-		args.TopologyLabelPrefix = "huawei.com/topotree."
-	}
-	if len(args.TopologyLabelPriority) == 0 {
-		args.TopologyLabelPriority = []string{"superpodid", "domainid"}
-	}
 	if args.MaxEffectiveDiff == nil {
 		args.MaxEffectiveDiff = utilptr.To[int32](5)
 	}
 	if args.NPUResourceName == nil {
 		args.NPUResourceName = utilptr.To[string]("huawei.com/Ascend910")
+	}
+	if args.InferencePodLabelKey == "" {
+		args.InferencePodLabelKey = "task-type"
+	}
+	if args.InferencePodLabelValue == "" {
+		args.InferencePodLabelValue = "inference"
 	}
 }

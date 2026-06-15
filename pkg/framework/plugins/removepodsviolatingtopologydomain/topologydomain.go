@@ -30,7 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
 
-	//	"sigs.k8s.io/descheduler/pkg/descheduler/evictions"
+	"sigs.k8s.io/descheduler/pkg/descheduler/evictions"
 	podutil "sigs.k8s.io/descheduler/pkg/descheduler/pod"
 	frameworktypes "sigs.k8s.io/descheduler/pkg/framework/types"
 	"sigs.k8s.io/descheduler/pkg/utils"
@@ -54,16 +54,13 @@ type RemovePodsViolatingTopologyDomain struct {
 	selector  labels.Selector
 }
 
-// TopologyMapping 存储一个推理任务中所有实例与拓扑域的对应关系(key:value = 拓扑域:域内实例列表)
-type TopologyMapping map[string][]*v1.Pod
-
 // TaskTopology 表示一个推理任务在所有拓扑域中的分布
 type TaskTopology struct {
 	// OwnerKey 是任务标识，格式为 "Kind/Namespace/Name"
 	// 如 "Deployment/default/llama-inference"
 	OwnerKey string
-	// Domains 按拓扑域分组
-	Domains TopologyMapping
+	// TopoMapping 建立一个任务下，各个拓扑域与其中推理实例的映射(key:value = 拓扑域:域内实例列表)
+	TopoMapping map[string][]*v1.Pod
 	// DominantDomain 是实例数量最多的拓扑域
 	DominantDomain string
 	// 该任务内每个 Pod 请求的 NPU 数量
@@ -91,12 +88,7 @@ func New(ctx context.Context, args runtime.Object, handle frameworktypes.Handle)
 		WithNamespaces(includedNamespaces).
 		WithoutNamespaces(excludedNamespaces).
 		WithFilter(func(pod *v1.Pod) bool { // 过滤出执行推理任务的pod
-			for _, container := range pod.Spec.Containers {
-				if strings.Contains(container.Image, "vllm") {
-					return true
-				}
-			}
-			return false
+			return pod.Labels[pluginArgs.InferencePodLabelKey] == pluginArgs.InferencePodLabelValue
 		}).
 		BuildFilterFunc()
 	if err != nil {
@@ -110,6 +102,15 @@ func New(ctx context.Context, args runtime.Object, handle frameworktypes.Handle)
 			return nil, fmt.Errorf("error parsing label selector: %v", err)
 		}
 	}
+
+	logger.V(2).Info("Plugin initialized",
+		"topologyKey", pluginArgs.TopologyKey,
+		"npuResourceName", pluginArgs.NPUResourceName,
+		"maxEffectiveDiff", pluginArgs.MaxEffectiveDiff,
+		"inferencePodLabelKey", pluginArgs.InferencePodLabelKey,
+		"inferencePodLabelValue", pluginArgs.InferencePodLabelValue,
+		"labelSelector", pluginArgs.LabelSelector,
+		"namespaces", pluginArgs.Namespaces)
 
 	return &RemovePodsViolatingTopologyDomain{
 		logger:    logger,
@@ -146,36 +147,6 @@ type PodScore struct {
 	DominantCount  int    // 主域的实例数
 }
 
-// resolveTopologyKey 解析实际使用的拓扑域标签键。
-// 优先通过 TopologyLabelPrefix 自动发现节点上的拓扑标签，
-// 未发现时回退到 TopologyKey。
-func (d *RemovePodsViolatingTopologyDomain) resolveTopologyKey(nodes []*v1.Node) (string, error) {
-	if d.args.TopologyLabelPrefix != "" {
-		matchedLabels := sets.New[string]()
-		for _, node := range nodes {
-			for labelKey := range node.Labels {
-				if strings.HasPrefix(labelKey, d.args.TopologyLabelPrefix) {
-					suffix := strings.TrimPrefix(labelKey, d.args.TopologyLabelPrefix)
-					matchedLabels.Insert(suffix)
-				}
-			}
-		}
-		if matchedLabels.Len() > 0 {
-			for _, priority := range d.args.TopologyLabelPriority {
-				if matchedLabels.Has(priority) {
-					return d.args.TopologyLabelPrefix + priority, nil
-				}
-			}
-			first, _ := matchedLabels.PopAny()
-			return d.args.TopologyLabelPrefix + first, nil
-		}
-	}
-	if d.args.TopologyKey == "" {
-		return "", fmt.Errorf("no topology label found and topologyKey is empty")
-	}
-	return d.args.TopologyKey, nil
-}
-
 // scoreTaskTopologies 为所有推理任务的 Pod 打分，按分数升序返回。
 // 主拓扑域中的 Pod → 100 分。
 // 非主拓扑域按数值差打分：effectiveDiff = min(|id偏移 - id主|, maxEffectiveDiff)，
@@ -184,11 +155,11 @@ func (d *RemovePodsViolatingTopologyDomain) resolveTopologyKey(nodes []*v1.Node)
 func scoreTaskTopologies(taskTopologies []*TaskTopology, maxEffectiveDiff int32) []PodScore {
 	var scored []PodScore
 	for _, task := range taskTopologies {
-		dominantCount := len(task.Domains[task.DominantDomain])
+		dominantCount := len(task.TopoMapping[task.DominantDomain])
 		if dominantCount == 0 {
 			continue
 		}
-		for domain, pods := range task.Domains {
+		for domain, pods := range task.TopoMapping {
 			var score int32
 			if domain == task.DominantDomain {
 				score = 100
@@ -236,12 +207,16 @@ func scoreTaskTopologies(taskTopologies []*TaskTopology, maxEffectiveDiff int32)
 
 // scoreOffDomainPodsForTask 对单个推理任务的非主域 Pod 打分，按分数升序返回。
 func scoreOffDomainPodsForTask(task *TaskTopology, maxEffectiveDiff int32) []PodScore {
-	dominantCount := len(task.Domains[task.DominantDomain])
+	dominantCount := len(task.TopoMapping[task.DominantDomain])
 	if dominantCount == 0 {
+		klog.V(4).Infof("Task %s: dominant domain %s has 0 pods, skipping scoring",
+			task.OwnerKey, task.DominantDomain)
 		return nil
 	}
+	klog.V(4).Infof("Scoring off-domain pods for task %s: dominant=%s, dominantCount=%d",
+		task.OwnerKey, task.DominantDomain, dominantCount)
 	var scored []PodScore
-	for domain, pods := range task.Domains {
+	for domain, pods := range task.TopoMapping {
 		if domain == task.DominantDomain {
 			continue
 		}
@@ -279,12 +254,17 @@ func scoreOffDomainPodsForTask(task *TaskTopology, maxEffectiveDiff int32) []Pod
 		ratioJ := scored[j].DomainCount * 100 / scored[j].DominantCount
 		return ratioI < ratioJ
 	})
+	klog.V(4).Infof("Task %s: scored %d off-domain pods, lowestScore=%d, highestScore=%d",
+		task.OwnerKey, len(scored),
+		scored[0].Score, scored[len(scored)-1].Score)
 	return scored
 }
 
 // buildTaskTopologies 遍历 Pod 列表，按推理任务分组后建立拓扑域映射
 // 返回 TaskTopology 切片，每个元素对应一个推理任务在各拓扑域中的分布
 func (d *RemovePodsViolatingTopologyDomain) buildTaskTopologies(pods []*v1.Pod, nodeMap map[string]*v1.Node, topologyKey string, prefix string) []*TaskTopology {
+	klog.V(4).Infof("Building task topologies: %d pods, topologyKey=%s, prefix=%s",
+		len(pods), topologyKey, prefix)
 	// 按推理任务分组
 	taskGroups := make(map[string][]*v1.Pod)
 	for _, pod := range pods {
@@ -294,11 +274,12 @@ func (d *RemovePodsViolatingTopologyDomain) buildTaskTopologies(pods []*v1.Pod, 
 		key := ownerKey(pod)
 		taskGroups[key] = append(taskGroups[key], pod)
 	}
+	klog.V(4).Infof("Grouped pods into %d task groups (from %d total pods)", len(taskGroups), len(pods))
 
 	// 为每个任务构建 TaskTopology
 	var taskTopologies []*TaskTopology
 	for ownerKey, pods := range taskGroups {
-		domains := make(TopologyMapping)
+		topoMap := make(map[string][]*v1.Pod)
 		for _, pod := range pods {
 			node, ok := nodeMap[pod.Spec.NodeName]
 			if !ok {
@@ -310,16 +291,18 @@ func (d *RemovePodsViolatingTopologyDomain) buildTaskTopologies(pods []*v1.Pod, 
 				klog.Warningf("Node %s does not have a topology label", klog.KObj(node))
 				continue
 			}
-			domains[domainValue] = append(domains[domainValue], pod)
+			topoMap[domainValue] = append(topoMap[domainValue], pod)
 		}
-		if len(domains) <= 1 {
-			continue // 只有一个或没有拓扑域，不需要处理
+		if len(topoMap) <= 1 {
+			klog.V(4).Infof("Task %s: %d pods in a single domain, skipping",
+				ownerKey, len(pods))
+			continue
 		}
 
 		// 找出主导拓扑域
 		var dominantDomain string
 		var maxCount int
-		for domain, pods := range domains {
+		for domain, pods := range topoMap {
 			if len(pods) > maxCount {
 				maxCount = len(pods)
 				dominantDomain = domain
@@ -330,12 +313,13 @@ func (d *RemovePodsViolatingTopologyDomain) buildTaskTopologies(pods []*v1.Pod, 
 		requestNPU := getPodNPURequest(pods[0], prefix)
 
 		taskTopologies = append(taskTopologies, &TaskTopology{
-			Domains:        domains,
+			TopoMapping:    topoMap,
 			DominantDomain: dominantDomain,
 			OwnerKey:       ownerKey,
 			RequestNPU:     requestNPU,
 		})
 	}
+	klog.V(4).Infof("Built %d multi-domain task topologies", len(taskTopologies))
 	return taskTopologies
 }
 
@@ -347,6 +331,7 @@ func getPodNPURequest(pod *v1.Pod, prefix string) int64 {
 		for resourceName, qty := range container.Resources.Requests {
 			if strings.HasPrefix(string(resourceName), prefix) {
 				npuNums = qty.Value()
+				klog.V(5).Infof("Pod %s requests %s=%d (from Requests)", klog.KObj(pod), resourceName, npuNums)
 			}
 		}
 	}
@@ -355,10 +340,12 @@ func getPodNPURequest(pod *v1.Pod, prefix string) int64 {
 			for resourceName, qty := range container.Resources.Limits {
 				if strings.HasPrefix(string(resourceName), prefix) {
 					npuNums = qty.Value()
+					klog.V(5).Infof("Pod %s requests %s=%d (from Limits)", klog.KObj(pod), resourceName, npuNums)
 				}
 			}
 		}
 	}
+	klog.V(5).Infof("Pod %s NPU request total=%d, prefix=%s", klog.KObj(pod), npuNums, prefix)
 	return npuNums
 }
 
@@ -366,6 +353,7 @@ func getPodNPURequest(pod *v1.Pod, prefix string) int64 {
 func getNodeTotalNPU(node *v1.Node, prefix string) int64 {
 	for resourceName, qty := range node.Status.Allocatable {
 		if strings.HasPrefix(string(resourceName), prefix) {
+			klog.V(4).Infof("node %s has resource %s", node.Name, resourceName)
 			return qty.Value()
 		}
 	}
@@ -373,11 +361,13 @@ func getNodeTotalNPU(node *v1.Node, prefix string) int64 {
 }
 
 // buildFreeNPUMap 构建拓扑域内各节点的空闲 NPU 映射（节点名 → 空闲卡数）
+// 后续修改成从节点的deviceplugin查询空闲卡数
 func buildFreeNPUMap(nodes []*v1.Node, getPodsAssignedToNode podutil.GetPodsAssignedToNodeFunc, prefix string) map[string]int64 {
 	freeMap := make(map[string]int64, len(nodes))
 	for _, node := range nodes {
 		total := getNodeTotalNPU(node, prefix)
 		if total == 0 {
+			klog.V(4).Infof("Node %s has no NPU resource matching prefix %s", klog.KObj(node), prefix)
 			continue
 		}
 		var used int64
@@ -386,68 +376,63 @@ func buildFreeNPUMap(nodes []*v1.Node, getPodsAssignedToNode podutil.GetPodsAssi
 			used += getPodNPURequest(pod, prefix)
 		}
 		freeMap[node.Name] = total - used
+		klog.V(4).Infof("Node %s: total NPU=%d, used=%d, free=%d", klog.KObj(node), total, used, total-used)
 	}
+	klog.V(1).Infof("Free NPU map built: %d nodes with NPU resources", len(freeMap))
 	return freeMap
 }
 
 // evictOffDomainPodsForTask 对一个推理任务的非主域 Pod 执行批量驱逐。
 // 构建主域节点空闲 NPU 映射，按分数从低到高逐个检查能否容纳 Pod。
-func evictOffDomainPodsForTask(ctx context.Context, handle frameworktypes.Handle, task *TaskTopology, scoredPods []PodScore, dominantNodes []*v1.Node, prefix string) {
+func evictOffDomainPodsForTask(ctx context.Context, handle frameworktypes.Handle, task *TaskTopology, scoredPods []PodScore, dominantNodes []*v1.Node, prefix string) error {
 	logger := klog.FromContext(ctx)
+	logger.V(2).Info("Evicting off-domain pods",
+		"task", task.OwnerKey,
+		"scoredPods", len(scoredPods),
+		"dominantNodes", len(dominantNodes))
 	getPodsAssignedToNode := handle.GetPodsAssignedToNodeFunc()
 
 	// 构建主域节点空闲 NPU 映射
 	freeMap := buildFreeNPUMap(dominantNodes, getPodsAssignedToNode, prefix)
-	logger.V(3).Info("Dominant domain free NPU map",
+	logger.V(4).Info("Dominant domain free NPU map",
 		"dominantDomain", task.DominantDomain,
 		"freeNPUMap", freeMap)
 
-	for _, ps := range scoredPods {
-		// 逐个查找空闲 NPU 足够的节点
-		targetNode := ""
-		for nodeName, free := range freeMap {
-			if free >= task.RequestNPU {
-				targetNode = nodeName
-				break
-			}
+	// 统计有多少 Pod 可以被驱逐（即主域内空闲 NPU 足够的节点数量）
+	var evictPodsCount int
+	for _, cards := range freeMap {
+		if cards >= task.RequestNPU {
+			evictPodsCount++
 		}
-		if targetNode == "" {
-			logger.V(2).Info("Skipping pod eviction: no node in dominant domain has enough free NPUs",
-				"pod", klog.KObj(ps.Pod),
-				"dominantDomain", task.DominantDomain,
-				"requiredNPUs", task.RequestNPU)
-			continue
-		}
-
-		logger.V(1).Info("Evicting pod with low topology score",
-			"pod", klog.KObj(ps.Pod),
-			"task", ownerKey(ps.Pod),
-			"score", ps.Score,
-			"dominantDomain", task.DominantDomain,
-			"targetNode", targetNode)
-		//		err := handle.Evictor().Evict(ctx, ps.Pod, evictions.EvictOptions{StrategyName: PluginName})
-		//		if err != nil {
-		//			logger.Error(err, "failed to evict pod", "pod", klog.KObj(ps.Pod))
-		//		} else {
-		//			freeMap[targetNode] -= task.RequestNPU
-		//		}
-		freeMap[targetNode] -= task.RequestNPU
 	}
+	logger.V(4).Info("Dominant domain evictable pods count",
+		"dominantDomain", task.DominantDomain,
+		"evictablePodsCount", evictPodsCount)
+
+	for _, ps := range scoredPods {
+		if evictPodsCount <= 0 {
+			break
+		}
+		err := handle.Evictor().Evict(ctx, ps.Pod, evictions.EvictOptions{StrategyName: PluginName})
+		if err != nil {
+			logger.Error(err, "failed to evict pod", "pod", klog.KObj(ps.Pod))
+		} else {
+			logger.V(1).Info("Evicted pod", "pod", klog.KObj(ps.Pod))
+			evictPodsCount--
+		}
+	}
+	return nil
 }
 
 // Deschedule 遍历所有推理任务，对每个 Pod 进行拓扑打分，
 // 优先驱逐分数低（偏移主拓扑域）的 Pod。
 func (d *RemovePodsViolatingTopologyDomain) Deschedule(ctx context.Context, nodes []*v1.Node) *frameworktypes.Status {
 	logger := klog.FromContext(klog.NewContext(ctx, d.logger)).WithValues("ExtensionPoint", frameworktypes.DescheduleExtensionPoint)
-	logger.V(1).Info("Processing pods for topology domain violation")
 
-	// 解析拓扑域标签键
-	topologyKey, err := d.resolveTopologyKey(nodes)
-	if err != nil {
-		return &frameworktypes.Status{
-			Err: fmt.Errorf("error resolving topology key: %v", err),
-		}
-	}
+	topologyKey := d.args.TopologyKey
+	logger.V(1).Info("Starting deschedule cycle",
+		"topologyKey", topologyKey,
+		"nodeCount", len(nodes))
 
 	nodeMap := make(map[string]*v1.Node, len(nodes))
 	domainNodes := make(map[string][]*v1.Node)
@@ -459,6 +444,11 @@ func (d *RemovePodsViolatingTopologyDomain) Deschedule(ctx context.Context, node
 		}
 	}
 
+	if len(domainNodes) == 0 {
+		logger.V(2).Info("No nodes with topology label found, skipping descheduling")
+	}
+	logger.V(2).Info("Domain distribution", "nodeCount", len(nodeMap), "domainCount", len(domainNodes))
+
 	pods, err := podutil.ListPodsOnNodes(nodes, d.handle.GetPodsAssignedToNodeFunc(), d.podFilter)
 	if err != nil {
 		return &frameworktypes.Status{
@@ -467,17 +457,25 @@ func (d *RemovePodsViolatingTopologyDomain) Deschedule(ctx context.Context, node
 	}
 
 	taskTopologies := d.buildTaskTopologies(pods, nodeMap, topologyKey, NPUPrefix)
+	logger.V(1).Info("Built task topologies",
+		"taskCount", len(taskTopologies))
 	if len(taskTopologies) == 0 {
 		logger.V(2).Info("No inference tasks with multi-domain distribution found")
 		return nil
 	}
 
 	for _, task := range taskTopologies {
+		logger.V(2).Info("Processing task",
+			"task", task.OwnerKey,
+			"total domain", len(task.TopoMapping),
+			"dominantDomain", task.DominantDomain,
+			"requestNPU", task.RequestNPU)
 		scoredPods := scoreOffDomainPodsForTask(task, *d.args.MaxEffectiveDiff)
 		if len(scoredPods) == 0 {
+			logger.V(2).Info("No off-domain pods to evict for task", "task", task.OwnerKey)
 			continue
 		}
-		logger.V(4).Info("Task topology scores",
+		logger.V(2).Info("Scored off-domain pods for eviction",
 			"task", task.OwnerKey,
 			"podCount", len(scoredPods))
 		for _, ps := range scoredPods {
@@ -488,8 +486,14 @@ func (d *RemovePodsViolatingTopologyDomain) Deschedule(ctx context.Context, node
 		}
 
 		dominantNodes := domainNodes[task.DominantDomain]
-		evictOffDomainPodsForTask(ctx, d.handle, task, scoredPods, dominantNodes, NPUPrefix)
+		if len(task.TopoMapping) > 1 {
+			if err := evictOffDomainPodsForTask(ctx, d.handle, task, scoredPods, dominantNodes, NPUPrefix); err != nil {
+				logger.Error(err, "failed to evict off-domain pods for task",
+					"task", task.OwnerKey)
+			}
+		}
 	}
 
+	logger.V(1).Info("Deschedule cycle completed")
 	return nil
 }

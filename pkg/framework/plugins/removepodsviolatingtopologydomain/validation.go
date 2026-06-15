@@ -21,14 +21,15 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/klog/v2"
 )
 
 // ValidateRemovePodsViolatingTopologyDomainArgs validates the plugin arguments.
 func ValidateRemovePodsViolatingTopologyDomainArgs(obj runtime.Object) error {
 	args := obj.(*RemovePodsViolatingTopologyDomainArgs)
 
-	if args.TopologyKey == "" && args.TopologyLabelPrefix == "" {
-		return fmt.Errorf("at least one of topologyKey or topologyLabelPrefix must be set")
+	if args.TopologyKey == "" {
+		klog.Warning("topologyKey is not set, will use default topology label \"huawei.com/topotree.domainid\"")
 	}
 
 	if args.MaxEffectiveDiff != nil && *args.MaxEffectiveDiff <= 0 {

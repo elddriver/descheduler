@@ -28,19 +28,10 @@ import (
 type RemovePodsViolatingTopologyDomainArgs struct {
 	metav1.TypeMeta `json:",inline"`
 
-	// TopologyKey 显式指定拓扑域标签键。
-	// 如果 TopologyLabelPrefix 未匹配到任何标签，则使用此值作为拓扑域划分依据。
+	// TopologyKey 指定节点标签的键用于划分拓扑域。
+	// 例如 "huawei.com/topotree.superpodid" 或 "huawei.com/topotree.domainid"。
 	// 默认 "huawei.com/topotree.domainid"。
 	TopologyKey string `json:"topologyKey,omitempty"`
-
-	// TopologyLabelPrefix 自动发现拓扑域标签的前缀。
-	// 插件扫描节点标签，从匹配此前缀的标签中按 LabelPriority 顺序选择。
-	// 例如 "huawei.com/topotree." 会匹配 huawei.com/topotree.superpodid 等标签。
-	TopologyLabelPrefix string `json:"topologyLabelPrefix,omitempty"`
-
-	// TopologyLabelPriority 自动发现时按此顺序选择拓扑标签后缀。
-	// 例如 ["superpodid", "domainid"] 表示优先使用 superpodid。
-	TopologyLabelPriority []string `json:"topologyLabelPriority,omitempty"`
 
 	// MaxEffectiveDiff 最大有效差值。
 	// 拓扑域 ID 的差值超过此值时分数不再继续降低，
@@ -57,6 +48,16 @@ type RemovePodsViolatingTopologyDomainArgs struct {
 	// (e.g., an inference deployment). The plugin will find the dominant
 	// topology domain for this group and evict pods outside of it.
 	LabelSelector *metav1.LabelSelector `json:"labelSelector,omitempty"`
+
+	// InferencePodLabelKey 标识推理 Pod 的标签键。
+	// 插件只处理匹配此标签的 Pod，默认 "task-type"。
+	// +optional
+	InferencePodLabelKey string `json:"inferencePodLabelKey,omitempty"`
+
+	// InferencePodLabelValue 标识推理 Pod 的标签值。
+	// 插件只处理匹配此标签的 Pod，默认 "inference"。
+	// +optional
+	InferencePodLabelValue string `json:"inferencePodLabelValue,omitempty"`
 
 	// Namespaces allows filtering on which namespaces to apply the descheduler.
 	Namespaces *api.Namespaces `json:"namespaces,omitempty"`
