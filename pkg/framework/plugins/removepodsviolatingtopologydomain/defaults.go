@@ -33,9 +33,10 @@ func SetDefaults_RemovePodsViolatingTopologyDomainArgs(obj runtime.Object) {
 	if args.MaxEffectiveDiff == nil {
 		args.MaxEffectiveDiff = utilptr.To[int32](5)
 	}
-	if args.NPUResourceName == nil {
-		args.NPUResourceName = utilptr.To[string]("huawei.com/Ascend910")
+	if args.NPUResourcePrefix == "" {
+		args.NPUResourcePrefix = "huawei.com"
 	}
+
 	if args.InferencePodLabelKey == "" {
 		args.InferencePodLabelKey = "task-type"
 	}

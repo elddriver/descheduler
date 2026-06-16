@@ -46,11 +46,6 @@ func (in *RemovePodsViolatingTopologyDomainArgs) DeepCopyInto(out *RemovePodsVio
 		*out = new(int32)
 		**out = **in
 	}
-	if in.NPUResourceName != nil {
-		in, out := &in.NPUResourceName, &out.NPUResourceName
-		*out = new(string)
-		**out = **in
-	}
 	return
 }
 

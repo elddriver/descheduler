@@ -39,10 +39,10 @@ type RemovePodsViolatingTopologyDomainArgs struct {
 	// +optional
 	MaxEffectiveDiff *int32 `json:"maxEffectiveDiff,omitempty"`
 
-	// NPUResourceName 节点上 NPU 资源名，用于计算主域剩余容量。
-	// 默认 "huawei.com/Ascend910"。
+	// NPUResourcePrefix 节点上 NPU 资源的前缀，用于匹配 NPU 资源名。
+	// 例如 "huawei.com/" 会匹配 huawei.com/Ascend910。默认 "huawei.com"。
 	// +optional
-	NPUResourceName *string `json:"npuResourceName,omitempty"`
+	NPUResourcePrefix string `json:"npuResourcePrefix,omitempty"`
 
 	// LabelSelector is used to identify pods belonging to the same group
 	// (e.g., an inference deployment). The plugin will find the dominant
